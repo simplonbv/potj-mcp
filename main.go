@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,7 +18,21 @@ import (
 	"github.com/urfave/cli/v3"
 	"promptsonthejob.nl/mcp/internal/auth"
 	"promptsonthejob.nl/mcp/internal/mcpserver"
+	"promptsonthejob.nl/mcp/internal/model"
 )
+
+const wellKnownProtectedResourcePath = "/.well-known/oauth-protected-resource"
+
+func isPostgresUrl(ctx context.Context, c *cli.Command, s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return errors.New("URL must use postgresql scheme")
+	}
+	return nil
+}
 
 func isHttpUrl(ctx context.Context, c *cli.Command, s string) error {
 	u, err := url.Parse(s)
@@ -27,17 +42,23 @@ func isHttpUrl(ctx context.Context, c *cli.Command, s string) error {
 	if !u.IsAbs() {
 		return errors.New("URL must be absolute")
 	}
-	// if u.Scheme != "https" {
-	// 	return errors.New("URL must use https")
-	// }
 	return nil
 }
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
 	cmd := &cli.Command{
 		Name:                   "Prompts on the Job MCP server",
 		UseShortOptionHandling: true,
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "dsn",
+				Aliases: []string{"d"},
+				Value:   "postgresql:///",
+				Sources: cli.EnvVars("DSN"),
+				Action:  isPostgresUrl,
+			},
 			&cli.StringFlag{
 				Name:    "issuer",
 				Value:   "https://login.simplon.biz",
@@ -61,7 +82,7 @@ func main() {
 				},
 				Action: func(ctx context.Context, c *cli.Command, s string) error {
 					if s != "sse" && s != "stdio" {
-						return fmt.Errorf("Transport must be sse or stdio")
+						return errors.New("transport must be sse or stdio")
 					}
 					return nil
 				},
@@ -74,7 +95,12 @@ func main() {
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			server := mcpserver.NewMCPServer()
+			pool, err := model.Connect(ctx, cmd.String("dsn"))
+			if err != nil {
+				return fmt.Errorf("can not connect to database: %w", err)
+			}
+			promptRepository := model.NewPostgresPromptRepository(pool)
+			server := mcpserver.NewMCPServer(logger, promptRepository)
 
 			transport := cmd.String("transport")
 			if transport == "stdio" {
@@ -89,10 +115,13 @@ func main() {
 
 				clnt, err := discovery.NewClient(ctx, issuer)
 				if err != nil {
-					return fmt.Errorf("Can not retrieve issuer metadata: %v", err)
+					return fmt.Errorf("can not retrieve issuer metadata: %w", err)
 				}
 
 				validator, err := auth.NewValidator(ctx, issuer, clnt.Metadata().JWKSURI, baseUrl)
+				if err != nil {
+					return fmt.Errorf("can not initialize authentication: %w", err)
+				}
 
 				metadata := &oauthex.ProtectedResourceMetadata{
 					Resource:               mcpUrl,

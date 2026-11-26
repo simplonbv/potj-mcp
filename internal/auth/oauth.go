@@ -125,10 +125,13 @@ func (o *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	err = json.NewEncoder(w).Encode(map[string]string{
 		"access_token": token.AccessToken,
 		"token_type":   token.TokenType,
 	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to JSON encode token: %v", err), http.StatusInternalServerError)
+	}
 }
 
 func generateRandom() (string, error) {
